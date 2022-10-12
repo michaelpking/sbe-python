@@ -80,7 +80,7 @@ class DecodedMessage:
 class Type:
     __slots__ = (
         'name', 'primitiveType', 'presence', 'semanticType',
-        'description', 'length', 'characterEncoding', 'nullValue')
+        'description', 'length', 'characterEncoding', 'nullValue', 'constantValue')
 
     name: str
     primitiveType: PrimitiveType
@@ -90,8 +90,9 @@ class Type:
     length: int
     characterEncoding: Optional[CharacterEncoding]
     nullValue: Optional[Union[str, int, float]]
+    constantValue: Optional[Union[str, int, float]]
 
-    def __init__(self, name: str, primitiveType: PrimitiveType, nullValue: Optional[str]):
+    def __init__(self, name: str, primitiveType: PrimitiveType, nullValue: Optional[str], constantValue: Optional[str]):
         super().__init__()
         self.name = name
         self.primitiveType = primitiveType
@@ -105,6 +106,13 @@ class Type:
                 self.nullValue = float(nullValue)
             else:
                 self.nullValue = int(nullValue)
+        if constantValue is not None:
+            if primitiveType == PrimitiveType.CHAR:
+                self.constantValue = chr(int(constantValue)).encode()
+            elif primitiveType in (PrimitiveType.FLOAT, PrimitiveType.DOUBLE):
+                self.constantValue = float(constantValue)
+            else:
+                self.constantValue = int(constantValue)
 
     def __repr__(self):
         rv = self.name + " ("
@@ -169,7 +177,7 @@ class Pointer:
             return self.set_.find_name_by_value(
                 rv.decode("ascii") if isinstance(rv, bytes) else str(rv))
         elif self.value.endswith("s"):
-            return rc.split(b'\x00', 1)[0].decode('ascii', errors='ignore').strip()
+            return rv.split(b'\x00', 1)[0].decode('ascii', errors='ignore').strip()
 
         return rv
 
@@ -885,8 +893,11 @@ def _decode_value(
     schema: Schema, rv: dict, name: str, t: Union[Type, Set, Enum, PrimitiveType], vals: list, cursor: Cursor
 ):
     if isinstance(t, Type):
-        rv[name] = _prettify_type(schema, t, vals[cursor.val])
-        cursor.val += 1
+        if t.presence != Presence.CONSTANT:
+            rv[name] = _prettify_type(schema, t, vals[cursor.val])
+            cursor.val += 1
+        else:
+            rv[name] = t.constantValue
 
     elif isinstance(t, Set):
         v = vals[cursor.val]
@@ -921,8 +932,7 @@ def _walk_fields_decode_composite(schema: Schema, rv: dict, composite: Composite
             _walk_fields_decode_composite(schema, rv[t.name], t, vals, cursor)
 
         else:
-            if t.presence != Presence.CONSTANT:
-                _decode_value(schema, rv, t.name, t, vals, cursor)
+            _decode_value(schema, rv, t.name, t, vals, cursor)
 
 
 def _walk_fields_decode(schema: Schema, rv: dict, fields: List[Union[Group, Field]], vals: List, cursor: Cursor):
@@ -945,8 +955,8 @@ def _walk_fields_decode(schema: Schema, rv: dict, fields: List[Union[Group, Fiel
             _walk_fields_decode_composite(schema, rv[f.name], f.type, vals, cursor)
 
         else:
-            if f.type.presence != Presence.CONSTANT:
-                _decode_value(schema, rv, f.name, f.type, vals, cursor)
+            _decode_value(schema, rv, f.name, f.type, vals, cursor)
+
 
 
 def _parse_schema(f: TextIO) -> Schema:
@@ -992,7 +1002,8 @@ def _parse_schema(f: TextIO) -> Schema:
             if action == "start":
                 attrs = dict(elem.items())
                 x = Type(name=attrs['name'], primitiveType=PrimitiveType(attrs['primitiveType']),
-                         nullValue=attrs['nullValue'] if 'nullValue' in attrs else None)
+                         nullValue=attrs['nullValue'] if 'nullValue' in attrs else None,
+                         constantValue = elem.text if len(elem.text) else None)
 
                 if x.primitiveType == PrimitiveType.CHAR:
                     if 'length' in attrs:
